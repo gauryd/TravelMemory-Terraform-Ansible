@@ -1,0 +1,194 @@
+
+---
+- name: Deploy TravelMemory application
+  hosts: web
+  become: true
+
+  vars_files:
+    - ../group_vars_database.yml
+
+  vars:
+    app_dir: /home/ubuntu/TravelMemory
+    frontend_dir: /home/ubuntu/TravelMemory/frontend
+    backend_dir: /home/ubuntu/TravelMemory/backend
+    web_root: /var/www/travelmemory
+    database_host: "10.0.2.92"
+
+  tasks:
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - nginx
+          - nodejs
+          - npm
+          - rsync
+        state: present
+        update_cache: true
+
+    - name: Install PM2 globally
+      community.general.npm:
+        name: pm2
+        global: true
+
+    - name: Clone TravelMemory repository
+      become_user: ubuntu
+      ansible.builtin.git:
+        repo: https://github.com/UnpredictablePrashant/TravelMemory.git
+        dest: "{{ app_dir }}"
+        version: main
+        update: true
+
+    - name: Install backend dependencies
+      become_user: ubuntu
+      community.general.npm:
+        path: "{{ backend_dir }}"
+        state: present
+
+    - name: Configure backend environment
+      ansible.builtin.copy:
+        dest: "{{ backend_dir }}/.env"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+        content: |
+          MONGO_URI=mongodb://{{ mongodb_user }}:{{ mongodb_password }}@{{ database_host }}:27017/{{ mongodb_database }}?authSource=admin
+          PORT=3001
+      no_log: true
+
+    - name: Install frontend dependencies
+      become_user: ubuntu
+      community.general.npm:
+        path: "{{ frontend_dir }}"
+        state: present
+
+    - name: Configure frontend API URL
+      ansible.builtin.copy:
+        dest: "{{ frontend_dir }}/.env"
+        owner: ubuntu
+        group: ubuntu
+        mode: "0644"
+        content: |
+          REACT_APP_BACKEND_URL=/api
+
+    - name: Build React frontend
+      become_user: ubuntu
+      ansible.builtin.command:
+        cmd: npm run build
+        chdir: "{{ frontend_dir }}"
+      environment:
+        CI: "false"
+
+    - name: Create frontend web root
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: "0755"
+
+    - name: Copy React build to Nginx web root
+      ansible.builtin.command:
+        cmd: "rsync -a --delete {{ frontend_dir }}/build/ {{ web_root }}/"
+      changed_when: true
+
+    - name: Set frontend file ownership
+      ansible.builtin.file:
+        path: "{{ web_root }}"
+        owner: www-data
+        group: www-data
+        recurse: true
+
+    - name: Configure backend systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/travelmemory-backend.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=TravelMemory Node.js Backend
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=ubuntu
+          WorkingDirectory={{ backend_dir }}
+          EnvironmentFile={{ backend_dir }}/.env
+          ExecStart=/usr/bin/node index.js
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart TravelMemory backend
+
+    - name: Configure Nginx for React and API
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/travelmemory
+        mode: "0644"
+        content: |
+          server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+
+              root {{ web_root }};
+              index index.html;
+
+              location /api/ {
+                  proxy_pass http://127.0.0.1:3001/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              location / {
+                  try_files $uri $uri/ /index.html;
+              }
+          }
+      notify: Reload Nginx
+
+    - name: Enable TravelMemory Nginx configuration
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/travelmemory
+        dest: /etc/nginx/sites-enabled/travelmemory
+        state: link
+      notify: Reload Nginx
+
+    - name: Disable default Nginx configuration
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
+    - name: Validate Nginx configuration
+      ansible.builtin.command:
+        cmd: nginx -t
+      changed_when: false
+
+    - name: Enable and start backend service
+      ansible.builtin.systemd:
+        name: travelmemory-backend
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Enable and start Nginx
+      ansible.builtin.service:
+        name: nginx
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart TravelMemory backend
+      ansible.builtin.systemd:
+        name: travelmemory-backend
+        daemon_reload: true
+        enabled: true
+        state: restarted
+
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

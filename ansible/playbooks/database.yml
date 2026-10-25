@@ -1,0 +1,100 @@
+
+---
+- name: Configure MongoDB on private database server
+  hosts: database
+  become: true
+  vars_files:
+    - ../group_vars_database.yml
+
+  tasks:
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - gnupg
+          - curl
+        state: present
+        update_cache: true
+
+    - name: Create MongoDB keyring directory
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download MongoDB signing key
+      ansible.builtin.get_url:
+        url: https://pgp.mongodb.com/server-8.0.asc
+        dest: /tmp/mongodb-server-8.0.asc
+        mode: "0644"
+
+    - name: Convert MongoDB signing key to keyring
+      ansible.builtin.command:
+        cmd: >
+          gpg --dearmor --yes
+          --output /usr/share/keyrings/mongodb-server-8.0.gpg
+          /tmp/mongodb-server-8.0.asc
+      args:
+        creates: /usr/share/keyrings/mongodb-server-8.0.gpg
+
+    - name: Add MongoDB repository
+      ansible.builtin.apt_repository:
+        repo: "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse"
+        filename: mongodb-org-8.0
+        state: present
+
+    - name: Install MongoDB
+      ansible.builtin.apt:
+        name: mongodb-org
+        state: present
+        update_cache: true
+
+    - name: Start and enable MongoDB
+      ansible.builtin.service:
+        name: mongod
+        state: started
+        enabled: true
+
+    - name: Configure MongoDB private network binding
+      ansible.builtin.lineinfile:
+        path: /etc/mongod.conf
+        regexp: '^\s*bindIp:'
+        line: "  bindIp: 127.0.0.1,10.0.2.92"
+        insertafter: '^\s*net:'
+      notify: Restart MongoDB
+
+    - name: Flush handlers before configuring the database user
+      ansible.builtin.meta: flush_handlers
+
+    - name: Create MongoDB application user
+      ansible.builtin.shell: |
+        mongosh --quiet <<'MONGO'
+        const admin = db.getSiblingDB("admin");
+        const existing = admin.getUser("{{ mongodb_user }}");
+        if (!existing) {
+          admin.createUser({
+            user: "{{ mongodb_user }}",
+            pwd: "{{ mongodb_password }}",
+            roles: [
+              { role: "readWrite", db: "{{ mongodb_database }}" }
+            ]
+          });
+        }
+        MONGO
+      args:
+        executable: /bin/bash
+      no_log: true
+
+    - name: Enable MongoDB authentication
+      ansible.builtin.blockinfile:
+        path: /etc/mongod.conf
+        marker: "# {mark} ANSIBLE MANAGED SECURITY"
+        block: |
+          security:
+            authorization: enabled
+      notify: Restart MongoDB
+
+  handlers:
+    - name: Restart MongoDB
+      ansible.builtin.service:
+        name: mongod
+        state: restarted

@@ -1,0 +1,48 @@
+---
+- name: Configure TravelMemory web server
+  hosts: web
+  become: true
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install basic packages
+      ansible.builtin.apt:
+        name:
+          - git
+          - curl
+          - nginx
+          - ca-certificates
+        state: present
+
+    - name: Install Node.js 22
+      ansible.builtin.shell: |
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+        apt-get install -y nodejs
+      args:
+        creates: /usr/bin/node
+
+    - name: Verify Node.js installation
+      ansible.builtin.command: node --version
+      register: node_version
+      changed_when: false
+
+    - name: Verify NPM installation
+      ansible.builtin.command: npm --version
+      register: npm_version
+      changed_when: false
+
+    - name: Show installed versions
+      ansible.builtin.debug:
+        msg:
+          - "Node.js: {{ node_version.stdout }}"
+          - "NPM: {{ npm_version.stdout }}"
+
+    - name: Enable Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true

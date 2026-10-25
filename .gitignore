@@ -1,0 +1,23 @@
+
+# Terraform files
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform/terraform.tfvars
+
+# SSH private keys and certificates
+*.pem
+*.key
+
+# Application secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+ansible-venv/
+
+# Ansible Vault password files
+vault-password.txt
